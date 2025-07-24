@@ -21,9 +21,10 @@ export class IntegrationTestHarness {
     }
 
     public static async start() {
+        const testDbPath = path.join(process.env.TMPDIR || '/tmp', `director-test-${Date.now()}.json`);
         const gateway = await Gateway.start({
             port: TEST_PORT,
-            databaseFilePath: path.join(__dirname, "config.test.json"),
+            databaseFilePath: testDbPath,
             registryURL: "http://localhost:3000",
         });
 

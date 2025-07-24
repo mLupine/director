@@ -172,7 +172,7 @@ describe("SimpleClient", () => {
 
       expect(result.isHealthy).toBe(false);
       expect(result.error).toBe("Connection health check failed");
-      expect(result.responseTime).toBeGreaterThan(0);
+      expect(result.responseTime).toBeGreaterThanOrEqual(0);
     });
   });
 });

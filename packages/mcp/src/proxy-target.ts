@@ -1,22 +1,20 @@
-import { ErrorCategorizer } from "@director.run/utilities/error-categorizer";
+import { AppError } from "@director.run/utilities/error";
 import { getLogger } from "@director.run/utilities/logger";
 import type {
   ProxyTargetAttributes,
-  ProxyTargetStatus,
   ProxyTransport,
 } from "@director.run/utilities/schema";
-import { defaultHealthChecker } from "./health-checker";
 import { SimpleClient } from "./simple-client";
-
-// Circuit breaker interface to avoid circular dependencies
-interface CircuitBreaker {
-  getState(): string;
-  execute<T>(operation: () => Promise<T>): Promise<T>;
-}
 
 const logger = getLogger(`mcp/proxy-target`);
 
 export type ProxyTargetTransport = ProxyTransport;
+export type ProxyTargetStatus =
+  | "starting"
+  | "running"
+  | "failed"
+  | "disabled"
+  | "disconnected";
 
 export class ProxyTarget extends SimpleClient {
   public readonly attributes: ProxyTargetAttributes;
@@ -25,15 +23,10 @@ export class ProxyTarget extends SimpleClient {
   private _lastErrorAt?: Date;
   private _connectedAt?: Date;
   private _lastAttemptAt?: Date;
-  private _circuitBreaker?: CircuitBreaker; // Will be injected from gateway layer
 
-  constructor(
-    attributes: ProxyTargetAttributes,
-    circuitBreaker?: CircuitBreaker,
-  ) {
+  constructor(attributes: ProxyTargetAttributes) {
     super(attributes.name.toLocaleLowerCase());
     this.attributes = attributes;
-    this._circuitBreaker = circuitBreaker;
   }
 
   public get status(): ProxyTargetStatus {
@@ -88,13 +81,11 @@ export class ProxyTarget extends SimpleClient {
     let suggestedAction = null;
 
     if (this._lastError) {
-      const categorizedError = ErrorCategorizer.categorize(this._lastError, {
-        targetName: this.name,
-        transport: this.attributes.transport.type,
-      });
-      errorCategory = categorizedError.category;
-      isRetryable = categorizedError.isRetryable;
-      suggestedAction = categorizedError.suggestedAction;
+      const errorCode = AppError.categorizeError(this._lastError);
+      const appError = new AppError(errorCode, this._lastError);
+      errorCategory = errorCode;
+      isRetryable = appError.isRetryable;
+      suggestedAction = appError.suggestedAction;
     }
 
     return {
@@ -106,7 +97,6 @@ export class ProxyTarget extends SimpleClient {
       errorCategory,
       isRetryable,
       suggestedAction,
-      circuitBreakerState: this._circuitBreaker?.getState() || null,
     };
   }
 
@@ -140,12 +130,7 @@ export class ProxyTarget extends SimpleClient {
     };
 
     try {
-      // Use circuit breaker if available
-      if (this._circuitBreaker) {
-        await this._circuitBreaker.execute(connectOperation);
-      } else {
-        await connectOperation();
-      }
+      await connectOperation();
 
       this.setStatus("running");
       logger.info({
@@ -154,22 +139,23 @@ export class ProxyTarget extends SimpleClient {
     } catch (error) {
       const originalError =
         error instanceof Error ? error : new Error(String(error));
-      const categorizedError = ErrorCategorizer.categorize(originalError, {
+      const errorCode = AppError.categorizeError(originalError);
+      const appError = new AppError(errorCode, originalError.message, {
         targetName: name,
         transport: transport.type,
         operation: "connect",
       });
 
       // Set status with categorized error information
-      const errorMessage = `[${categorizedError.category}] ${categorizedError.message}`;
+      const errorMessage = `[${errorCode}] ${originalError.message}`;
       this.setStatus("failed", errorMessage);
 
       logger.error({
         message: `failed to connect to target ${name}`,
         error: originalError,
-        category: categorizedError.category,
-        isRetryable: categorizedError.isRetryable,
-        suggestedAction: categorizedError.suggestedAction,
+        category: errorCode,
+        isRetryable: appError.isRetryable,
+        suggestedAction: appError.suggestedAction,
       });
 
       if (throwOnError) {
@@ -240,12 +226,25 @@ export class ProxyTarget extends SimpleClient {
       };
     }
 
+    const startTime = Date.now();
+
     try {
-      // Use the dedicated health checker for transport-specific checks
-      const result = await defaultHealthChecker.checkHealth(
-        this.attributes.transport,
-        this.name,
-      );
+      let result: { isHealthy: boolean; responseTime?: number; error?: string };
+
+      if (this.attributes.transport.type === "http") {
+        result = await this.checkHttpHealth(
+          this.attributes.transport.url,
+          startTime,
+        );
+      } else {
+        // For stdio transports, use the basic connection health check
+        const isHealthy = await this.healthCheck();
+        result = {
+          isHealthy,
+          responseTime: Date.now() - startTime,
+          error: isHealthy ? undefined : "Connection health check failed",
+        };
+      }
 
       // Update status based on health check result
       if (!result.isHealthy && this._status === "running") {
@@ -262,8 +261,80 @@ export class ProxyTarget extends SimpleClient {
 
       return {
         isHealthy: false,
+        responseTime: Date.now() - startTime,
         error: errorMessage,
       };
+    }
+  }
+
+  private async checkHttpHealth(
+    url: string,
+    startTime: number,
+  ): Promise<{ isHealthy: boolean; responseTime?: number; error?: string }> {
+    const timeout = 5000; // 5 seconds
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+    try {
+      // Try a simple HEAD request first, fall back to GET if not supported
+      let response: Response;
+
+      try {
+        response = await fetch(url, {
+          method: "HEAD",
+          signal: controller.signal,
+          headers: {
+            "User-Agent": "Director-HealthChecker/1.0",
+          },
+        });
+      } catch (headError) {
+        // If HEAD fails, try GET request
+        response = await fetch(url, {
+          method: "GET",
+          signal: controller.signal,
+          headers: {
+            "User-Agent": "Director-HealthChecker/1.0",
+          },
+        });
+      }
+
+      clearTimeout(timeoutId);
+      const responseTime = Date.now() - startTime;
+
+      // Consider 2xx and 3xx responses as healthy
+      const isHealthy = response.status >= 200 && response.status < 400;
+
+      if (!isHealthy) {
+        logger.debug({
+          message: "http health check returned non-healthy status",
+          targetName: this.name,
+          url,
+          status: response.status,
+          statusText: response.statusText,
+          responseTime,
+        });
+      }
+
+      return {
+        isHealthy,
+        responseTime,
+        error: isHealthy
+          ? undefined
+          : `HTTP ${response.status}: ${response.statusText}`,
+      };
+    } catch (error) {
+      clearTimeout(timeoutId);
+      const responseTime = Date.now() - startTime;
+
+      if (error instanceof Error && error.name === "AbortError") {
+        return {
+          isHealthy: false,
+          responseTime,
+          error: `Health check timeout after ${timeout}ms`,
+        };
+      }
+
+      throw error;
     }
   }
 }

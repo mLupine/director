@@ -109,9 +109,10 @@ export function createProxyStoreRouter({
       )
       .query(({ input }) => {
         const proxy = proxyStore.get(input.proxyId);
-        const targetStatus = proxy
-          .getTargetsStatus()
-          .find((target) => target.name === input.serverName);
+        const proxyData = proxy.toPlainObject();
+        const targetStatus = proxyData.servers.find(
+          (server) => server.name === input.serverName,
+        );
 
         if (!targetStatus) {
           throw new Error(`Server ${input.serverName} not found`);
@@ -148,7 +149,7 @@ export function createProxyStoreRouter({
           serverName: z.string(),
         }),
       )
-      .mutation(async ({ input }) => {
+      .mutation(({ input }) => {
         const proxy = proxyStore.get(input.proxyId);
         const target = proxy.getTarget(input.serverName);
 
@@ -157,11 +158,6 @@ export function createProxyStoreRouter({
         }
 
         target.enable();
-        await proxyStore.updateServerStatus(
-          input.proxyId,
-          input.serverName,
-          target.getStatusInfo(),
-        );
 
         return target.getStatusInfo();
       }),
@@ -173,7 +169,7 @@ export function createProxyStoreRouter({
           serverName: z.string(),
         }),
       )
-      .mutation(async ({ input }) => {
+      .mutation(({ input }) => {
         const proxy = proxyStore.get(input.proxyId);
         const target = proxy.getTarget(input.serverName);
 
@@ -182,11 +178,6 @@ export function createProxyStoreRouter({
         }
 
         target.disable();
-        await proxyStore.updateServerStatus(
-          input.proxyId,
-          input.serverName,
-          target.getStatusInfo(),
-        );
 
         return target.getStatusInfo();
       }),
@@ -207,11 +198,6 @@ export function createProxyStoreRouter({
         }
 
         await target.restart();
-        await proxyStore.updateServerStatus(
-          input.proxyId,
-          input.serverName,
-          target.getStatusInfo(),
-        );
 
         return target.getStatusInfo();
       }),
@@ -227,7 +213,7 @@ export function createProxyStoreRouter({
           targets.map((target) => target.healthCheck().catch(() => false)),
         );
 
-        return proxy.getTargetsStatus();
+        return proxy.toPlainObject().servers;
       }),
   });
 }

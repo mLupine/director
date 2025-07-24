@@ -127,13 +127,6 @@ export class ProxyServer extends Server {
     }
   }
 
-  public getTargetsStatus() {
-    return this.targets.map((target) => ({
-      name: target.name,
-      ...target.getStatusInfo(),
-    }));
-  }
-
   public getTarget(name: string): ProxyTarget | undefined {
     return this.targets.find((target) => target.name === name);
   }

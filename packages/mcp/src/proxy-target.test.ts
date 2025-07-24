@@ -95,7 +95,6 @@ describe("ProxyTarget", () => {
         errorCategory: expect.any(String),
         isRetryable: expect.any(Boolean),
         suggestedAction: expect.any(String),
-        circuitBreakerState: null,
       });
     });
   });
@@ -250,62 +249,6 @@ describe("ProxyTarget", () => {
 
       expect(result.isHealthy).toBe(false);
       expect(failingProxyTarget.status).toBe("failed");
-    });
-  });
-
-  describe("Circuit Breaker Integration", () => {
-    it("should use circuit breaker when available", async () => {
-      const mockCircuitBreaker = {
-        execute: vi.fn().mockResolvedValue(undefined),
-        getState: vi.fn().mockReturnValue("closed"),
-      };
-
-      const targetWithCircuitBreaker = new ProxyTarget(
-        mockAttributes,
-        mockCircuitBreaker,
-      );
-      vi.spyOn(targetWithCircuitBreaker, "connectToStdio").mockResolvedValue();
-
-      await targetWithCircuitBreaker.smartConnect();
-
-      expect(mockCircuitBreaker.execute).toHaveBeenCalled();
-      expect(targetWithCircuitBreaker.status).toBe("running");
-    });
-
-    it("should handle circuit breaker open state", async () => {
-      const mockCircuitBreaker = {
-        execute: vi
-          .fn()
-          .mockRejectedValue(new Error("Circuit breaker is OPEN")),
-        getState: vi.fn().mockReturnValue("open"),
-      };
-
-      const targetWithCircuitBreaker = new ProxyTarget(
-        mockAttributes,
-        mockCircuitBreaker,
-      );
-
-      await targetWithCircuitBreaker.smartConnect();
-
-      expect(targetWithCircuitBreaker.status).toBe("failed");
-      expect(targetWithCircuitBreaker.lastError).toContain(
-        "Circuit breaker is OPEN",
-      );
-    });
-
-    it("should include circuit breaker state in status info", () => {
-      const mockCircuitBreaker = {
-        getState: vi.fn().mockReturnValue("half_open"),
-        execute: vi.fn().mockImplementation((fn) => fn()),
-      };
-
-      const targetWithCircuitBreaker = new ProxyTarget(
-        mockAttributes,
-        mockCircuitBreaker,
-      );
-      const statusInfo = targetWithCircuitBreaker.getStatusInfo();
-
-      expect(statusInfo.circuitBreakerState).toBe("half_open");
     });
   });
 });
